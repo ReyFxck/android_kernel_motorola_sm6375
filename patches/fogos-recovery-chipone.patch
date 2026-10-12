@@ -1,0 +1,53 @@
+diff --git a/drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c b/drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c
+--- a/drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c
++++ b/drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c
+@@ -666,6 +666,14 @@ static int cts_driver_probe(struct spi_device *client)
+ #endif
+ 
+ #ifdef CFG_CTS_DRM_NOTIFIER
++#if defined(CONFIG_INPUT_TOUCHSCREEN_MMI)
++    /* Keep Motorola's panel selector authoritative on dual-panel fogos. */
++    if (client->dev.of_node && !mmi_device_is_available(client->dev.of_node)) {
++        cts_err("%s : mmi: device not supported\n", __func__);
++        return -ENODEV;
++    }
++#endif
++
+     {
+         struct device_node *dp = client->dev.of_node;
+ 
+@@ -676,9 +684,17 @@ static int cts_driver_probe(struct spi_device *client)
+             else
+                 ret = -ENODEV;
+ 
+-            cts_err("%s: %s not actived\n", __func__, dp->name);
+-            return ret;
++            /*
++             * Recovery can have the display running before the DRM panel
++             * object/notifier is available.  mmi_device_is_available() has
++             * already rejected the wrong touch variant above, so keep
++             * probing the selected Chipone controller instead of dropping
++             * the input device completely.
++             */
++            cts_warn("%s: %s DRM panel unavailable (%d), continuing for recovery\n",
++                __func__, dp->name, ret);
++            active_panel = NULL;
++            ret = 0;
+         }
+     }
+ #else
+@@ -823,8 +839,12 @@ static int cts_driver_probe(struct spi_device *client)
+ #ifdef CONFIG_CTS_PM_FB_NOTIFIER
+     ret = cts_init_pm_fb_notifier(cts_data);
+     if (ret) {
+-        cts_err("Init FB notifier failed %d", ret);
+-        goto err_deinit_sysfs;
++        /*
++         * A panel notifier is useful for suspend/resume, but recovery must
++         * not lose the touchscreen merely because that notifier is absent.
++         */
++        cts_warn("Init FB notifier failed %d, continuing without notifier", ret);
++        ret = 0;
+     }
+ #endif
+ 
