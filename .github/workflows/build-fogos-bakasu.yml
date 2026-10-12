@@ -45,8 +45,8 @@ jobs:
           ln -s BakaSU/kernel drivers/staging/sukisu
 
           echo "BakaSU commit: $(git -C drivers/staging/BakaSU rev-parse HEAD)"
-          grep -n "KERNEL_SU_UAPI_VERSION" drivers/staging/sukisu/uapi/supercall.h
-          test "$(sed -n 's/.*KERNEL_SU_UAPI_VERSION = \([0-9][0-9]*\).*/\1/p' drivers/staging/sukisu/uapi/supercall.h)" = "5"
+          grep -n "KERNEL_SU_UAPI_VERSION" drivers/staging/BakaSU/uapi/supercall.h
+          test "$(sed -n 's/.*KERNEL_SU_UAPI_VERSION = \([0-9][0-9]*\).*/\1/p' drivers/staging/BakaSU/uapi/supercall.h)" = "5"
 
       - name: Configure fogos kernel
         shell: bash
