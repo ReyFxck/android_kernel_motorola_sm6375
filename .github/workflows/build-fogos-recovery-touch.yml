@@ -1,0 +1,157 @@
+name: Build fogos recovery touch test
+
+on:
+  push:
+    branches:
+      - recovery-touch-test
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout recovery touch branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preserve test patch and restore exact running-kernel source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp patches/fogos-recovery-chipone.patch "$RUNNER_TEMP/fogos-recovery-chipone.patch"
+          git reset --hard bf737327bfeb42b3bd720a52bde6d7a3ce602514
+          echo "Source HEAD: $(git rev-parse HEAD)"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison flex build-essential git python3 rsync kmod \
+            libssl-dev libelf-dev libncurses-dev \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+
+      - name: Fetch exact Android Clang 12 toolchain
+        run: |
+          git clone --depth=1 \
+            https://github.com/anrui2032/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
+            "$RUNNER_TEMP/clang-r416183b"
+          "$RUNNER_TEMP/clang-r416183b/bin/clang" --version
+
+      - name: Recreate exact BakaSU overlay used by current boot
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf drivers/staging/sukisu drivers/staging/BakaSU
+          git clone https://github.com/Baka-SU/BakaSU.git drivers/staging/BakaSU
+          git -C drivers/staging/BakaSU checkout f6cb7e70c10ebde149f3121ae68b945514fd0801
+          ln -s BakaSU/kernel drivers/staging/sukisu
+          test "$(sed -n 's/.*KERNEL_SU_UAPI_VERSION = \([0-9][0-9]*\).*/\1/p' drivers/staging/BakaSU/uapi/supercall.h)" = "5"
+
+      - name: Apply recovery touch test patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check "$RUNNER_TEMP/fogos-recovery-chipone.patch"
+          git apply "$RUNNER_TEMP/fogos-recovery-chipone.patch"
+          git diff --check
+          git diff -- drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c
+
+      - name: Configure fogos kernel
+        shell: bash
+        env:
+          ARCH: arm64
+          LLVM: "1"
+          LLVM_IAS: "1"
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/clang-r416183b/bin:$PATH"
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+          rm -rf out
+          mkdir -p out
+
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            vendor/holi-qgki_defconfig
+
+          scripts/kconfig/merge_config.sh -m -O out out/.config \
+            arch/arm64/configs/vendor/ext_config/lineage_moto-holi.config \
+            arch/arm64/configs/vendor/ext_config/moto-holi-fogos.config \
+            arch/arm64/configs/ksu.config
+
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            olddefconfig
+
+          grep -q '^CONFIG_TOUCHSCREEN_CHIPONE_V2_MMI=m' out/.config
+          grep -q '^CONFIG_TOUCHSCREEN_ILITEK_V3_MMI=m' out/.config
+          grep -q '^CONFIG_KSU=y' out/.config
+
+          make -s O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            kernelrelease | tee kernelrelease.txt
+
+      - name: Build matching Image and patched Chipone module
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/clang-r416183b/bin:$PATH"
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+          make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" \
+            Image drivers/input/touchscreen/chipone_tddi_v2_mmi/chipone_tddi_v2_mmi.ko \
+            2>&1 | tee build.log
+
+          IMAGE=out/arch/arm64/boot/Image
+          CHIPONE=out/drivers/input/touchscreen/chipone_tddi_v2_mmi/chipone_tddi_v2_mmi.ko
+          test -s "$IMAGE"
+          test -s "$CHIPONE"
+
+          sha256sum "$IMAGE" "$CHIPONE" | tee SHA256SUMS
+          modinfo "$CHIPONE" | tee chipone.modinfo.txt || true
+          strings "$CHIPONE" | grep -F 'continuing for recovery' | tee patch-marker.txt
+
+      - name: Prepare artifact
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp -f out/arch/arm64/boot/Image artifact/ 2>/dev/null || true
+          cp -f out/drivers/input/touchscreen/chipone_tddi_v2_mmi/chipone_tddi_v2_mmi.ko artifact/ 2>/dev/null || true
+          cp -f out/.config artifact/fogos.config 2>/dev/null || true
+          cp -f build.log artifact/ 2>/dev/null || true
+          cp -f SHA256SUMS artifact/ 2>/dev/null || true
+          cp -f kernelrelease.txt artifact/ 2>/dev/null || true
+          cp -f chipone.modinfo.txt artifact/ 2>/dev/null || true
+          cp -f patch-marker.txt artifact/ 2>/dev/null || true
+          cp -f "$RUNNER_TEMP/fogos-recovery-chipone.patch" artifact/ 2>/dev/null || true
+          {
+            echo 'Target: moto g34 5G (fogos) recovery touch test'
+            echo 'Kernel source HEAD: bf737327bfeb42b3bd720a52bde6d7a3ce602514'
+            echo 'BakaSU: f6cb7e70c10ebde149f3121ae68b945514fd0801 (UAPI 5)'
+            echo 'Test: keep Motorola mmi panel selection, tolerate unavailable DRM panel/notifier in recovery'
+            echo 'This artifact is NOT directly flashable; chipone_tddi_v2_mmi.ko must be packed into the matching vendor_boot recovery ramdisk.'
+          } > artifact/BUILD_INFO.txt
+
+      - name: Upload recovery touch test artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fogos-recovery-touch-test
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 14
