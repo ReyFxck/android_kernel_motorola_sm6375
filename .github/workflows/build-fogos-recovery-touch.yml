@@ -20,11 +20,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Preserve test patch and restore exact running-kernel source commit
+      - name: Restore exact running-kernel source commit
         shell: bash
         run: |
           set -euo pipefail
-          cp patches/fogos-recovery-chipone.patch "$RUNNER_TEMP/fogos-recovery-chipone.patch"
           git fetch --no-tags origin bf737327bfeb42b3bd720a52bde6d7a3ce602514 --depth=1
           git reset --hard bf737327bfeb42b3bd720a52bde6d7a3ce602514
           echo "Source HEAD: $(git rev-parse HEAD)"
@@ -54,14 +53,78 @@ jobs:
           ln -s BakaSU/kernel drivers/staging/sukisu
           test "$(sed -n 's/.*KERNEL_SU_UAPI_VERSION = \([0-9][0-9]*\).*/\1/p' drivers/staging/BakaSU/uapi/supercall.h)" = "5"
 
-      - name: Apply recovery touch test patch
+      - name: Apply recovery touch test changes
         shell: bash
         run: |
           set -euo pipefail
-          git apply --check "$RUNNER_TEMP/fogos-recovery-chipone.patch"
-          git apply "$RUNNER_TEMP/fogos-recovery-chipone.patch"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c')
+          s = path.read_text()
+
+          old = '''#ifdef CFG_CTS_DRM_NOTIFIER
+              {
+                  struct device_node *dp = client->dev.of_node;
+          '''
+          new = '''#ifdef CFG_CTS_DRM_NOTIFIER
+          #if defined(CONFIG_INPUT_TOUCHSCREEN_MMI)
+              /* Keep Motorola's panel selector authoritative on dual-panel fogos. */
+              if (client->dev.of_node && !mmi_device_is_available(client->dev.of_node)) {
+                  cts_err("%s : mmi: device not supported\\n", __func__);
+                  return -ENODEV;
+              }
+          #endif
+
+              {
+                  struct device_node *dp = client->dev.of_node;
+          '''
+          if old not in s:
+              raise SystemExit('probe selector anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''            cts_err("%s: %s not actived\\n", __func__, dp->name);
+                      return ret;
+          '''
+          new = '''            /*
+                       * Recovery can have the display running before the DRM panel
+                       * object/notifier is available. mmi_device_is_available() has
+                       * already rejected the wrong touch variant above, so keep
+                       * probing the selected Chipone controller instead of dropping
+                       * the input device completely.
+                       */
+                      cts_warn("%s: %s DRM panel unavailable (%d), continuing for recovery\\n",
+                          __func__, dp->name, ret);
+                      active_panel = NULL;
+                      ret = 0;
+          '''
+          if old not in s:
+              raise SystemExit('DRM panel failure anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    ret = cts_init_pm_fb_notifier(cts_data);
+              if (ret) {
+                  cts_err("Init FB notifier failed %d", ret);
+                  goto err_deinit_sysfs;
+              }
+          '''
+          new = '''    ret = cts_init_pm_fb_notifier(cts_data);
+              if (ret) {
+                  /* Recovery must not lose touch just because panel notifications are absent. */
+                  cts_warn("Init FB notifier failed %d, continuing without notifier", ret);
+                  ret = 0;
+              }
+          '''
+          if old not in s:
+              raise SystemExit('FB notifier failure anchor not found')
+          s = s.replace(old, new, 1)
+
+          path.write_text(s)
+          PY
+
           git diff --check
           git diff -- drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c
+          grep -q 'continuing for recovery' drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c
 
       - name: Configure fogos kernel
         shell: bash
@@ -139,7 +202,7 @@ jobs:
           cp -f kernelrelease.txt artifact/ 2>/dev/null || true
           cp -f chipone.modinfo.txt artifact/ 2>/dev/null || true
           cp -f patch-marker.txt artifact/ 2>/dev/null || true
-          cp -f "$RUNNER_TEMP/fogos-recovery-chipone.patch" artifact/ 2>/dev/null || true
+          git diff -- drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c > artifact/fogos-recovery-chipone.diff 2>/dev/null || true
           {
             echo 'Target: moto g34 5G (fogos) recovery touch test'
             echo 'Kernel source HEAD: bf737327bfeb42b3bd720a52bde6d7a3ce602514'
