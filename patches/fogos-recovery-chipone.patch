@@ -16,7 +16,7 @@ diff --git a/drivers/input/touchscreen/chipone_tddi_v2_mmi/cts_driver.c b/driver
      {
          struct device_node *dp = client->dev.of_node;
  
-@@ -676,9 +684,17 @@ static int cts_driver_probe(struct spi_device *client)
+@@ -676,8 +684,16 @@ static int cts_driver_probe(struct spi_device *client)
              else
                  ret = -ENODEV;
  
