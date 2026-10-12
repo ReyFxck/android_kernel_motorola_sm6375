@@ -18,13 +18,14 @@ jobs:
       - name: Checkout recovery touch branch
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Preserve test patch and restore exact running-kernel source commit
         shell: bash
         run: |
           set -euo pipefail
           cp patches/fogos-recovery-chipone.patch "$RUNNER_TEMP/fogos-recovery-chipone.patch"
+          git fetch --no-tags origin bf737327bfeb42b3bd720a52bde6d7a3ce602514 --depth=1
           git reset --hard bf737327bfeb42b3bd720a52bde6d7a3ce602514
           echo "Source HEAD: $(git rev-parse HEAD)"
 
